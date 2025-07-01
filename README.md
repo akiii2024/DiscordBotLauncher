@@ -1,6 +1,6 @@
 # Discord Bot Launcher
 
-Discord botのzipファイルをドラッグアンドドロップして、tokenを入力するだけでbotを稼働させられるGUIプログラムです。https://github.com/akiii2024/easy_bot_creater　と一緒に使うことを想定しています
+Discord botのzipファイルをドラッグアンドドロップして、tokenを入力するだけでbotを稼働させられるGUIプログラムです。[easy bot creater](https://github.com/akiii2024/easy_bot_creater)と一緒に使うことを想定しています
 
 ## 🚀 クイックスタート（推奨）
 
