@@ -114,10 +114,9 @@ Botが外部APIを使用する場合：
 
 ## 🖥️ 対応環境
 
-- **OS**: Windows 10/11
-- **アーキテクチャ**: x64
-- **メモリ**: 512MB以上推奨
-- **ディスク**: 100MB以上の空き容量
+- **OS**: Windows 10
+- **Python**: 3.12
+- 上記の環境で動作確認しています。
 
 ## 👨‍💻 開発者向け情報
 
@@ -148,21 +147,13 @@ python build_exe.py
 - tkinterdnd2==0.3.0
 - PyInstaller（exe化時）
 
-## 📝 ライセンス
-
-このプロジェクトはMITライセンスの下で公開されています。
-
-## 🤝 貢献
-
-バグ報告や機能要望は[Issues](https://github.com/your-username/DiscordBotLauncher/issues)でお知らせください。
 
 ## 📞 サポート
 
-問題が発生した場合：
+問題が発生した場合や質問がある場合は、以下の方法でお問い合わせください：
 
-1. このREADMEのトラブルシューティングを確認
-2. エラーログファイル（error_log.txt）を確認
-3. [Issues](https://github.com/your-username/DiscordBotLauncher/issues)で報告
+- **Discord**: [aki_2024]
+- **Twitter**: [@aki_2024]
 
 ---
 
