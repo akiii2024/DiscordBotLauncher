@@ -32,6 +32,7 @@ def build_with_command():
         "--onefile",  # 単一ファイルにまとめる
         "--windowed",  # コンソールウィンドウを非表示
         "--name=BotLauncher",  # 実行ファイル名
+        f"--icon={os.path.join(os.getcwd(), 'icon.ico')}",  # アイコンファイルの絶対パスを指定
         f"--additional-hooks-dir={os.getcwd()}",  # hookディレクトリを指定
         "--hidden-import=tkinterdnd2",  # tkinterdnd2を明示的にインポート
         "--hidden-import=tkinterdnd2.tkdnd",
