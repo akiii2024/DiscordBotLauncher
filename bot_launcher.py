@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
-import tkinterdnd2 as dnd
 import zipfile
 import os
 import subprocess
@@ -10,6 +9,19 @@ import tempfile
 import sys
 import re
 from pathlib import Path
+from multiprocessing import freeze_support
+import importlib.util
+import io
+from contextlib import redirect_stdout, redirect_stderr
+
+# tkinterdnd2を安全にインポート
+try:
+    import tkinterdnd2 as dnd
+    DND_AVAILABLE = True
+except ImportError:
+    DND_AVAILABLE = False
+    dnd = None
+    print("警告: tkinterdnd2が利用できません。ドラッグアンドドロップ機能は無効になります。")
 
 
 class BotLauncher:
@@ -19,19 +31,19 @@ class BotLauncher:
         self.root.geometry("800x700")  # 高さを少し増やす
         
         # tkinterdnd2の利用可能性をチェック
-        self.dnd_available = hasattr(root, 'tk') and hasattr(root.tk, 'splitlist')
+        self.dnd_available = DND_AVAILABLE and dnd is not None
         
-        # 通常のtkinterウィンドウの場合の処理
-        if not self.dnd_available:
-            # 通常のtkinterウィンドウの場合、splitlistメソッドを追加
-            if hasattr(root, 'tk'):
-                root.tk.splitlist = lambda data: data.split() if isinstance(data, str) else data
+        # tkinterのsplitlistメソッドを準備
+        if hasattr(root, 'tk') and not hasattr(root.tk, 'splitlist'):
+            root.tk.splitlist = lambda data: data.split() if isinstance(data, str) else data
         
         # bot実行用の変数
         self.bot_process = None
+        self.bot_thread = None  # 内蔵実行用のスレッド
         self.bot_dir = None
         self.is_running = False
         self.env_vars = {}  # 追加の環境変数を保存
+        self.use_embedded_python = True  # 内蔵Pythonを使用するかどうか
         
         self.setup_ui()
         
@@ -326,15 +338,62 @@ class BotLauncher:
         if additional_env_vars:
             self.log_message(f"追加の環境変数を設定しました: {', '.join(additional_env_vars.keys())}")
         
+    def get_python_executable(self):
+        """適切なPython実行ファイルパスを取得"""
+        # exe環境の場合
+        if getattr(sys, 'frozen', False):
+            # システムのPythonを探す
+            if os.name == 'nt':  # Windows
+                # システムPATHからpython.exeを探す
+                for path in os.environ.get('PATH', '').split(os.pathsep):
+                    python_exe = os.path.join(path, 'python.exe')
+                    if os.path.exists(python_exe) and not python_exe == sys.executable:
+                        return python_exe
+                
+                # よくあるPythonのインストール場所を確認
+                common_paths = [
+                    r"C:\Python39\python.exe",
+                    r"C:\Python38\python.exe",
+                    r"C:\Python37\python.exe",
+                    r"C:\Python310\python.exe",
+                    r"C:\Python311\python.exe",
+                    r"C:\Python312\python.exe",
+                    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python39\python.exe"),
+                    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python310\python.exe"),
+                    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python311\python.exe"),
+                    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python312\python.exe"),
+                ]
+                
+                for python_path in common_paths:
+                    if os.path.exists(python_path):
+                        return python_path
+                
+                # Pythonが見つからない場合はエラー
+                return None
+            else:
+                # Linux/Mac
+                return shutil.which('python3') or shutil.which('python')
+        else:
+            # 通常の環境
+            return sys.executable
+    
     def install_requirements(self, bot_dir):
         """requirements.txtから依存関係をインストール"""
         req_path = os.path.join(bot_dir, 'requirements.txt')
+        
+        # システムのPythonを取得
+        system_python = self.get_python_executable()
+        if not system_python:
+            self.log_message("エラー: システムにPythonがインストールされていません")
+            self.log_message("Pythonをインストールしてから再度実行してください")
+            return None
+            
         if os.path.exists(req_path):
             self.log_message("依存関係をインストール中...")
             try:
                 # 仮想環境を作成
                 venv_path = os.path.join(bot_dir, 'venv')
-                subprocess.run([sys.executable, '-m', 'venv', venv_path], check=True)
+                subprocess.run([system_python, '-m', 'venv', venv_path], check=True)
                 
                 # 仮想環境のpythonとpipのパスを取得
                 if os.name == 'nt':  # Windows
@@ -363,7 +422,8 @@ class BotLauncher:
                 return None
         else:
             self.log_message("requirements.txtが見つかりません")
-            return sys.executable
+            # exe環境でもシステムのPythonを返す
+            return system_python
             
     def start_bot(self):
         if not hasattr(self, 'selected_zip'):
@@ -431,20 +491,50 @@ class BotLauncher:
             # .envファイルを作成
             self.create_env_file(self.bot_dir, token)
             
-            # 依存関係をインストール
+            # exe環境で内蔵Pythonを使用
+            if getattr(sys, 'frozen', False) and self.use_embedded_python:
+                self.log_message("内蔵Python環境でBotを実行します...")
+                self._run_bot_embedded(main_py_path)
+                return
+            
+            # 通常の外部Python実行
             python_path = self.install_requirements(self.bot_dir)
             if not python_path:
-                python_path = sys.executable
+                self.root.after(0, self._bot_failed, "Pythonがインストールされていません。\nPythonをインストールしてから再度実行してください。")
+                return
                 
             # botを起動
             self.log_message("Botを起動中...")
+            self.log_message(f"使用するPython: {python_path}")
             self.is_running = True
             
             # 環境変数を設定
             env = os.environ.copy()
             env['PYTHONPATH'] = self.bot_dir
             
+            # PyInstallerでexe化されているかを検出
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                # exe環境の場合、PYTHONDONTWRITEBYTECODEを設定
+                env['PYTHONDONTWRITEBYTECODE'] = '1'
+                # multiprocessingの初期化を無効化
+                env['MULTIPROCESSING_FORKING_DISABLE'] = '1'
+            
             # botプロセスを開始
+            # Windows exe環境での新しいウィンドウ表示を防ぐ
+            startupinfo = None
+            creationflags = 0
+            
+            if os.name == 'nt':  # Windows
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                # exe環境の場合、CREATE_NO_WINDOWとDETACHED_PROCESSを組み合わせる
+                if getattr(sys, 'frozen', False):
+                    creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+                else:
+                    creationflags = subprocess.CREATE_NO_WINDOW
+            
             self.bot_process = subprocess.Popen(
                 [python_path, 'main.py'],
                 cwd=self.bot_dir,
@@ -452,7 +542,9 @@ class BotLauncher:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env=env
+                env=env,
+                startupinfo=startupinfo,
+                creationflags=creationflags
             )
             
             self.root.after(0, self._bot_started)
@@ -513,18 +605,231 @@ class BotLauncher:
             except:
                 pass
                 
+    def _run_bot_embedded(self, main_py_path):
+        """内蔵Python環境でBotを実行"""
+        import asyncio
+        
+        try:
+            # 必要なモジュールをインストール
+            self._install_embedded_requirements()
+            
+            # main.pyの内容を読み込む
+            with open(main_py_path, 'r', encoding='utf-8') as f:
+                bot_code = f.read()
+            
+            # 環境変数を設定
+            os.chdir(self.bot_dir)
+            sys.path.insert(0, self.bot_dir)
+            
+            # .envファイルから環境変数を読み込む
+            env_path = os.path.join(self.bot_dir, '.env')
+            if os.path.exists(env_path):
+                with open(env_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and '=' in line and not line.startswith('#'):
+                            key, value = line.split('=', 1)
+                            os.environ[key.strip()] = value.strip()
+            
+            self.log_message("Botを起動中...")
+            self.is_running = True
+            self.root.after(0, self._bot_started)
+            
+            # 標準出力・エラー出力をリダイレクト
+            stdout_buffer = io.StringIO()
+            stderr_buffer = io.StringIO()
+            
+            def log_output():
+                # バッファから出力を読み取ってログに表示
+                stdout_content = stdout_buffer.getvalue()
+                stderr_content = stderr_buffer.getvalue()
+                
+                if stdout_content:
+                    for line in stdout_content.splitlines():
+                        if line.strip():
+                            self.root.after(0, self.log_message, line)
+                    stdout_buffer.truncate(0)
+                    stdout_buffer.seek(0)
+                
+                if stderr_content:
+                    for line in stderr_content.splitlines():
+                        if line.strip():
+                            # ログレベルを判定
+                            if '[INFO' in line:
+                                self.root.after(0, self.log_message, line)
+                            elif '[WARNING' in line or '[WARN' in line:
+                                self.root.after(0, self.log_message, f"[警告] {line}")
+                            elif '[ERROR' in line or '[CRITICAL' in line:
+                                self.root.after(0, self.log_message, f"[エラー] {line}")
+                            else:
+                                self.root.after(0, self.log_message, line)
+                    stderr_buffer.truncate(0)
+                    stderr_buffer.seek(0)
+                
+                # 実行中なら定期的にチェック
+                if self.is_running:
+                    self.root.after(100, log_output)
+            
+            # 出力監視を開始
+            self.root.after(100, log_output)
+            
+            # Windows環境でのイベントループポリシー設定
+            if os.name == 'nt':
+                # スレッドで実行する前にポリシーを設定
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            
+            # 現在のスレッド用の新しいイベントループを作成
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            
+            # 停止チェック用のタスクを作成
+            async def check_stop():
+                while self.is_running:
+                    await asyncio.sleep(0.1)
+                # 停止が要求された場合、すべてのタスクをキャンセル
+                tasks = [task for task in asyncio.all_tasks() if not task.done()]
+                for task in tasks:
+                    task.cancel()
+                # ループを停止
+                new_loop.stop()
+            
+            # Botコードを実行
+            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+                # グローバル名前空間を準備
+                bot_globals = {
+                    '__name__': '__main__',
+                    '__file__': main_py_path,
+                    '__doc__': None,
+                    '__package__': None
+                }
+                
+                try:
+                    # 停止チェックタスクをスケジュール
+                    new_loop.create_task(check_stop())
+                    
+                    # コードを実行（bot.run()が呼ばれる想定）
+                    exec(bot_code, bot_globals)
+                except SystemExit:
+                    # bot.run()が正常終了した場合
+                    pass
+                except Exception as e:
+                    self.log_message(f"実行エラー: {str(e)}")
+                    import traceback
+                    self.log_message(traceback.format_exc())
+                finally:
+                    # イベントループのクリーンアップ
+                    try:
+                        # 残りのタスクをキャンセル
+                        pending_tasks = [task for task in asyncio.all_tasks(new_loop) if not task.done()]
+                        if pending_tasks:
+                            for task in pending_tasks:
+                                task.cancel()
+                            # キャンセルされたタスクの完了を待つ
+                            try:
+                                new_loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+                            except:
+                                pass
+                        
+                        if not new_loop.is_closed():
+                            new_loop.close()
+                    except:
+                        pass
+            
+        except Exception as e:
+            error_msg = f"内蔵実行エラー: {str(e)}"
+            self.root.after(0, self._bot_failed, error_msg)
+            import traceback
+            self.log_message(f"詳細: {traceback.format_exc()}")
+        finally:
+            self.is_running = False
+            self.root.after(0, self._bot_stopped)
+    
+    def _install_embedded_requirements(self):
+        """内蔵環境用の依存関係チェック"""
+        req_path = os.path.join(self.bot_dir, 'requirements.txt')
+        if os.path.exists(req_path):
+            self.log_message("依存関係を確認中...")
+            
+            # 内蔵されている主要パッケージのリスト
+            embedded_packages = {
+                'discord': 'discord.py',
+                'discord.py': 'discord.py',
+                'py-cord': 'discord.py (Py-Cord)',
+                'aiohttp': 'aiohttp',
+                'python-dotenv': 'python-dotenv',
+                'dotenv': 'python-dotenv',
+                'requests': 'requests',
+                'asyncio': 'asyncio',
+                'websockets': 'websockets',
+            }
+            
+            try:
+                # requirements.txtを読み込み
+                with open(req_path, 'r', encoding='utf-8') as f:
+                    requirements = f.read().splitlines()
+                
+                # パッケージの利用可能性をチェック
+                for req in requirements:
+                    req = req.strip()
+                    if req and not req.startswith('#'):
+                        # バージョン指定を除去
+                        package_name = req.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].strip()
+                        
+                        # 内蔵パッケージかチェック
+                        if package_name.lower() in embedded_packages:
+                            try:
+                                # パッケージのインポートを試行
+                                if package_name.lower() in ['discord', 'discord.py', 'py-cord']:
+                                    import discord
+                                elif package_name.lower() in ['python-dotenv', 'dotenv']:
+                                    import dotenv
+                                else:
+                                    __import__(package_name.lower().replace('-', '_'))
+                                self.log_message(f"✓ {embedded_packages[package_name.lower()]} - 利用可能")
+                            except ImportError:
+                                self.log_message(f"✗ {package_name} - 内蔵されていません（基本機能で代替）")
+                        else:
+                            self.log_message(f"- {package_name} - 外部パッケージ（スキップ）")
+                            
+            except Exception as e:
+                self.log_message(f"依存関係の確認中にエラー: {str(e)}")
+            
+            self.log_message("内蔵パッケージでBotを実行します...")
+    
     def stop_bot(self):
-        if self.bot_process and self.is_running:
+        if self.is_running:
             self.log_message("Botを停止中...")
             self.is_running = False
             
-            # プロセスを終了
-            if os.name == 'nt':  # Windows
-                subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.bot_process.pid)], 
-                             capture_output=True)
-            else:  # Linux/Mac
-                self.bot_process.terminate()
-                
+            # 外部プロセスの場合
+            if self.bot_process:
+                # プロセスを終了
+                if os.name == 'nt':  # Windows
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.bot_process.pid)], 
+                                 capture_output=True)
+                else:  # Linux/Mac
+                    self.bot_process.terminate()
+            
+            # 内蔵実行の場合、より安全な停止処理
+            if getattr(sys, 'frozen', False) and self.use_embedded_python:
+                try:
+                    import asyncio
+                    # 現在実行中のループを安全に取得
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # 実行中のタスクをキャンセル
+                        tasks = asyncio.all_tasks(loop)
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        self.log_message(f"{len(tasks)}個のタスクをキャンセルしました")
+                    except RuntimeError:
+                        # 実行中のループがない場合（正常な状態）
+                        self.log_message("アクティブなイベントループはありません")
+                except Exception as e:
+                    # エラーが発生しても停止処理は続行
+                    self.log_message(f"停止処理中の警告: {str(e)}")
+                    
             self.status_label.config(text="ステータス: 停止中...", foreground="orange")
 
     def select_file(self):
@@ -551,19 +856,21 @@ def main():
         print(f"実行パス: {sys.executable}")
         print(f"作業ディレクトリ: {os.getcwd()}")
         
-        # tkinterdnd2のインポートと初期化を試行
+        # tkinterdnd2の初期化を試行
         root = None
-        try:
-            import tkinterdnd2 as dnd
-            print("tkinterdnd2 のインポートに成功しました")
-            root = dnd.Tk()
-            print("tkinterdnd2 の初期化に成功しました")
-        except (ImportError, RuntimeError) as e:
-            print(f"tkinterdnd2 の初期化に失敗: {e}")
-            # フォールバック: 通常のtkinterを使用
+        if DND_AVAILABLE and dnd is not None:
+            try:
+                root = dnd.Tk()
+                print("tkinterdnd2 の初期化に成功しました")
+            except (RuntimeError, OSError) as e:
+                print(f"tkinterdnd2 の初期化に失敗: {e}")
+                root = None
+        
+        # フォールバック: 通常のtkinterを使用
+        if root is None:
             import tkinter as tk
             root = tk.Tk()
-            print("通常のtkinterにフォールバックしました")
+            print("通常のtkinterを使用します")
         
         app = BotLauncher(root)
         root.mainloop()
@@ -599,4 +906,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Windows exe環境でのmultiprocessing問題を回避
+    freeze_support()
     main() 
